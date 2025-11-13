@@ -313,7 +313,6 @@ func main() {
 
 		event, _ := payload["event"].(map[string]interface{})
 		eventID, _ := payload["event_id"].(string)
-		botID, _ := payload["bot_id"].(string)
 		retryNum := c.GetHeader("X-Slack-Retry-Num")
 		if event["type"] == "message" {
 			// drop edits, bot messages, and Slack retry duplicates
@@ -322,7 +321,7 @@ func main() {
 				return
 			}
 
-			// botID, _ := event["bot_id"].(string)
+			botID, _ := event["bot_id"].(string)
 			channel, _ := event["channel"].(string)
 			threadTS, _ := event["ts"].(string)
 			text, _ := event["text"].(string)
