@@ -761,9 +761,9 @@ func main() {
 
 		event, _ := payload["event"].(map[string]interface{})
 		eventID, _ := payload["event_id"].(string)
-		retryNum := c.GetHeader("X-Slack-Retry-Num")
+		// We ignore Slack retry headers and deduplicate via event_id.
 		if event["type"] == "message" {
-			// drop edits, bot messages, and Slack retry duplicates
+			// Dedup retry deliveries
 			if eventID != "" && hasProcessed(eventID) {
 				c.Status(http.StatusOK)
 				return
@@ -775,33 +775,37 @@ func main() {
 			text, _ := event["text"].(string)
 			subtype, _ := event["subtype"].(string)
 
-			// Ignore messages from bots to prevent loops, and messages with no text.
-			_, isBot := event["bot_id"]
-			if isBot || text == "" || subtype != "" {
+			// Only process messages posted by the configured error bot.
+			if botID == "" || botID != os.Getenv("ERROR_BOT_ID") {
+				c.Status(http.StatusOK)
+				return
+			}
+			// Optional extra safety: ignore this app's own bot messages to prevent loops if misconfigured.
+			if self := strings.TrimSpace(os.Getenv("SELF_BOT_ID")); self != "" && botID == self {
+				c.Status(http.StatusOK)
+				return
+			}
+			// Ignore edited/deleted/etc. subtypes, but allow normal bot posts (subtype=="bot_message").
+			if subtype != "" && subtype != "bot_message" {
+				c.Status(http.StatusOK)
+				return
+			}
+			if strings.TrimSpace(text) == "" {
 				c.Status(http.StatusOK)
 				return
 			}
 
-			// Always ack immediately to avoid Slack retries
+			// Ack immediately to stop further retries
 			c.Status(http.StatusOK)
-
-			// Only process once
 			if eventID != "" {
 				markProcessed(eventID)
 			}
 
-			// process asynchronously
-			go func(ch, ts, message, retry string) {
-				fmt.Println("Received message from user:", message)
+			go func(ch, ts, message string) {
+				fmt.Println("Processing error bot message:", message)
 				explanation := explainError(message)
 				postToSlackWithCreateButton(ch, ts, explanation, message)
-			}(channel, threadTS, text, retryNum)
-			// Respond only if message came from the error-reporting bot
-			if botID == os.Getenv("ERROR_BOT_ID") {
-				fmt.Println("Received message from error bot:", text)
-				explanation := explainError(text)
-				postToSlackWithCreateButton(channel, threadTS, explanation, text)
-			}
+			}(channel, threadTS, text)
 			return
 		}
 
