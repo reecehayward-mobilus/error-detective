@@ -50,10 +50,10 @@ func main() {
 			subtype, _ := event["subtype"].(string)
 
 			// Only process messages posted by the configured error bot.
-			// if botID == "" || botID != os.Getenv("ERROR_BOT_ID") {
-			// 	c.Status(http.StatusOK)
-			// 	return
-			// }
+			if botID == "" || botID != os.Getenv("ERROR_BOT_ID") {
+				c.Status(http.StatusOK)
+				return
+			}
 			// Optional extra safety: ignore this app's own bot messages to prevent loops if misconfigured.
 			if self := strings.TrimSpace(os.Getenv("SELF_BOT_ID")); self != "" && botID == self {
 				c.Status(http.StatusOK)
