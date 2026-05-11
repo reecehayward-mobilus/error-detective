@@ -77,3 +77,17 @@ func takeTicketContext(tok string) (ticketContext, bool) {
 	delete(ticketCache.m, tok)
 	return it.Ctx, true
 }
+
+// getTicketContext retrieves the cached ticket context without deleting it.
+// This allows multiple handlers (e.g., both Backlog and dig-deeper buttons)
+// to read the same context independently.
+func getTicketContext(tok string) (ticketContext, bool) {
+	ticketCache.mu.Lock()
+	defer ticketCache.mu.Unlock()
+	it, ok := ticketCache.m[tok]
+	if !ok || time.Now().After(it.Expire) {
+		delete(ticketCache.m, tok)
+		return ticketContext{}, false
+	}
+	return it.Ctx, true
+}

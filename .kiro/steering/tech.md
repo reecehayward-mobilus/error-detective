@@ -54,7 +54,7 @@ All configuration is via environment variables (loaded from `.env` in local dev 
 - `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `ERROR_BOT_ID`
 - `OPENAI_API_KEY` or `GEMINI_API_KEY`
 - `BACKLOG_BASE_URL`, `BACKLOG_API_KEY`, `BACKLOG_PROJECT_KEY`, `BACKLOG_ISSUE_TYPE_ID`, `BACKLOG_PRIORITY_ID`
-- `REPO_ROOTS` — colon/comma-separated paths for source code context gathering
+- `BITBUCKET_USERNAME`, `BITBUCKET_APP_PASSWORD`, `BITBUCKET_BRANCH` — Bitbucket Cloud API access for code context
 
 ## Notes
 

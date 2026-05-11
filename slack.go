@@ -83,7 +83,45 @@ func postToSlack(channel, threadTS, text string) {
 	}
 }
 
+// buildSlackPayloadWithButtons builds the Slack Block Kit payload for an explanation message.
+// Returns the blocks array. Used by postToSlackWithCreateButton and tests.
+func buildSlackPayloadWithButtons(explanation, token string, includeBitbucket bool) []map[string]any {
+	elements := []map[string]any{
+		{
+			"type":      "button",
+			"text":      map[string]string{"type": "plain_text", "text": "Backlogに起票"},
+			"style":     "primary",
+			"value":     token,
+			"action_id": "create_backlog_ticket",
+		},
+	}
+
+	if includeBitbucket {
+		elements = append(elements, map[string]any{
+			"type":      "button",
+			"text":      map[string]string{"type": "plain_text", "text": "深掘りする"},
+			"value":     token,
+			"action_id": "dig_deeper_bitbucket",
+		})
+	}
+
+	return []map[string]any{
+		{
+			"type": "section",
+			"text": map[string]any{
+				"type": "mrkdwn",
+				"text": explanation,
+			},
+		},
+		{
+			"type":     "actions",
+			"elements": elements,
+		},
+	}
+}
+
 // postToSlackWithCreateButton posts the explanation and appends an Actions block with a one-click Backlog button.
+// When Bitbucket is configured, a "深掘りする" button is also included.
 func postToSlackWithCreateButton(channel, threadTS, explanation, errorText string) {
 	if !backlogConfigured() {
 		postToSlack(channel, threadTS, explanation)
@@ -96,32 +134,12 @@ func postToSlackWithCreateButton(channel, threadTS, explanation, errorText strin
 		return
 	}
 
-	// Build payload with button
+	// Build payload with buttons
 	fallback := explanation
 	if len(fallback) > 300 {
 		fallback = fallback[:300] + "…"
 	}
-	blocks := []map[string]any{
-		{
-			"type": "section",
-			"text": map[string]any{
-				"type": "mrkdwn",
-				"text": explanation,
-			},
-		},
-		{
-			"type": "actions",
-			"elements": []map[string]any{
-				{
-					"type":      "button",
-					"text":      map[string]string{"type": "plain_text", "text": "Backlogに起票"},
-					"style":     "primary",
-					"value":     tok,
-					"action_id": "create_backlog_ticket",
-				},
-			},
-		},
-	}
+	blocks := buildSlackPayloadWithButtons(explanation, tok, bitbucketConfigured())
 	payload := map[string]any{
 		"channel":      channel,
 		"thread_ts":    threadTS,
@@ -151,24 +169,61 @@ func postToSlackWithCreateButton(channel, threadTS, explanation, errorText strin
 }
 
 // postToSlackSimple posts a simple mrkdwn message in thread without actions.
+// Handles Slack's 3000-char section block limit by splitting into multiple blocks.
 func postToSlackSimple(channel, threadTS, text string) {
 	fallback := text
 	if len(fallback) > 300 {
 		fallback = fallback[:300] + "…"
 	}
+
+	// Slack section blocks have a 3000-char text limit.
+	// Split long messages into multiple section blocks.
+	const maxBlockText = 3000
+	var blocks []map[string]any
+	remaining := text
+	for remaining != "" {
+		chunk := remaining
+		if len(chunk) > maxBlockText {
+			// Try to split at a newline to avoid breaking mid-line
+			cutAt := maxBlockText
+			if idx := strings.LastIndex(chunk[:cutAt], "\n"); idx > cutAt/2 {
+				cutAt = idx + 1
+			}
+			chunk = remaining[:cutAt]
+			remaining = remaining[cutAt:]
+		} else {
+			remaining = ""
+		}
+		blocks = append(blocks, map[string]any{
+			"type": "section",
+			"text": map[string]any{"type": "mrkdwn", "text": chunk},
+		})
+	}
+
 	payload := map[string]any{
 		"channel":   channel,
 		"thread_ts": threadTS,
 		"text":      fallback,
-		"blocks": []map[string]any{
-			{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}},
-		},
+		"blocks":    blocks,
 	}
 	b, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", "https://slack.com/api/chat.postMessage", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("SLACK_BOT_TOKEN"))
-	http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("[slack] postToSlackSimple error: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	var slackResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&slackResp); err != nil {
+		fmt.Printf("[slack] decode error: %v\n", err)
+		return
+	}
+	if ok, _ := slackResp["ok"].(bool); !ok {
+		fmt.Printf("[slack] postToSlackSimple API error: %s\n", slackResp["error"])
+	}
 }
 
 func getSlackPermalink(channel, ts string) (string, error) {
@@ -197,35 +252,44 @@ func getSlackPermalink(channel, ts string) (string, error) {
 }
 
 func getParentMessageText(channel, threadTS string) (string, error) {
+	msg, err := getParentMessageFull(channel, threadTS)
+	if err != nil {
+		return "", err
+	}
+	text, _ := msg["text"].(string)
+	return text, nil
+}
+
+// getParentMessageFull fetches the thread parent message as a raw map,
+// including text, blocks, and attachments. This allows extractFullSlackMessage
+// to be used on the result to get the complete error text with stack traces.
+func getParentMessageFull(channel, threadTS string) (map[string]any, error) {
 	form := url.Values{}
 	form.Set("channel", channel)
 	form.Set("ts", threadTS)
+	form.Set("limit", "1")
+	form.Set("inclusive", "true")
 	req, _ := http.NewRequest("POST", "https://slack.com/api/conversations.replies", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("SLACK_BOT_TOKEN"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	var out struct {
-		OK       bool `json:"ok"`
-		Messages []struct {
-			Text     string `json:"text"`
-			TS       string `json:"ts"`
-			ThreadTS string `json:"thread_ts"`
-		} `json:"messages"`
-		Error string `json:"error"`
+		OK       bool             `json:"ok"`
+		Messages []map[string]any `json:"messages"`
+		Error    string           `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
+		return nil, err
 	}
 	if !out.OK {
-		return "", fmt.Errorf("conversations.replies error: %s", out.Error)
+		return nil, fmt.Errorf("conversations.replies error: %s", out.Error)
 	}
 	if len(out.Messages) == 0 {
-		return "", fmt.Errorf("no messages in thread")
+		return nil, fmt.Errorf("no messages in thread")
 	}
-	// First message is the parent
-	return out.Messages[0].Text, nil
+	return out.Messages[0], nil
 }

@@ -21,7 +21,7 @@ This is a single-file application (`main.go`). All logic lives in one package (`
 - **HTTP endpoints** — `/slack/events` (Slack Events API), `/slack/interactions` (button clicks)
 - **Event deduplication** — in-memory map with 15-minute TTL
 - **Message extraction** — parses Slack text, blocks, and attachments into plain text
-- **Code context gathering** — resolves `file.go:line` references against `REPO_ROOTS` and extracts surrounding lines
+- **Code context gathering** — fetches source code from Bitbucket Cloud API when "深掘りする" button is clicked
 - **AI explanation** — delegates to OpenAI or Gemini based on `AI_PROVIDER`
 - **Slack posting** — threaded replies with Block Kit (mrkdwn sections + action buttons)
 - **Backlog integration** — one-time-use token cache, issue creation via REST API

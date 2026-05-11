@@ -134,57 +134,129 @@ func main() {
 			c.Status(http.StatusBadRequest)
 			return
 		}
-		if p.Type != "block_actions" || len(p.Actions) == 0 || p.Actions[0].ActionID != "create_backlog_ticket" {
+		if p.Type != "block_actions" || len(p.Actions) == 0 {
 			c.Status(http.StatusOK)
 			return
 		}
-		token := p.Actions[0].Value
-		ctx, ok := takeTicketContext(token)
-		// If cache expired or missing, reconstruct from payload and Slack API
-		if !ok {
+
+		actionID := p.Actions[0].ActionID
+
+		switch actionID {
+		case "create_backlog_ticket":
+			token := p.Actions[0].Value
+			ctx, ok := takeTicketContext(token)
+			// If cache expired or missing, reconstruct from payload and Slack API
+			if !ok {
+				threadTS := p.Message.ThreadTS
+				if threadTS == "" {
+					threadTS = p.Message.TS
+				}
+				// Extract explanation from the section block
+				explanation := ""
+				for _, b := range p.Message.Blocks {
+					if b.Type == "section" && b.Text.Text != "" {
+						explanation = b.Text.Text
+						break
+					}
+				}
+				// Fetch original error text from thread parent
+				errText, err := getParentMessageText(p.Channel.ID, threadTS)
+				if err != nil {
+					// As a last resort, continue with minimal context
+					errText = ""
+				}
+				ctx = ticketContext{Channel: p.Channel.ID, ThreadTS: threadTS, ErrorText: errText, Explanation: explanation}
+			}
+			// Ack immediately
+			c.Status(http.StatusOK)
+
+			go func(tc ticketContext) {
+				// Add permalink into description
+				permalink, err := getSlackPermalink(tc.Channel, tc.ThreadTS)
+				summary, description := buildBacklogIssue(tc)
+				if err == nil && permalink != "" {
+					description = strings.Replace(description, "Slackスレッド: (後で追加)", "Slackスレッド: "+permalink, 1)
+				}
+				issueKey, issueURL, err := createBacklogIssue(
+					os.Getenv("BACKLOG_PROJECT_KEY"),
+					os.Getenv("BACKLOG_BASE_URL"),
+					os.Getenv("BACKLOG_API_KEY"),
+					summary, description,
+				)
+				if err != nil {
+					postToSlackSimple(tc.Channel, tc.ThreadTS, fmt.Sprintf(":x: Backlog作成に失敗しました: %v", err))
+					return
+				}
+				postToSlackSimple(tc.Channel, tc.ThreadTS, fmt.Sprintf(":white_check_mark: Backlogチケットを作成しました: %s\n%s", issueKey, issueURL))
+			}(ctx)
+
+		case "dig_deeper_bitbucket":
+			channel := p.Channel.ID
 			threadTS := p.Message.ThreadTS
 			if threadTS == "" {
 				threadTS = p.Message.TS
 			}
-			// Extract explanation from the section block
-			explanation := ""
-			for _, b := range p.Message.Blocks {
-				if b.Type == "section" && b.Text.Text != "" {
-					explanation = b.Text.Text
-					break
-				}
-			}
-			// Fetch original error text from thread parent
-			errText, err := getParentMessageText(p.Channel.ID, threadTS)
-			if err != nil {
-				// As a last resort, continue with minimal context
-				errText = ""
-			}
-			ctx = ticketContext{Channel: p.Channel.ID, ThreadTS: threadTS, ErrorText: errText, Explanation: explanation}
-		}
-		// Ack immediately
-		c.Status(http.StatusOK)
 
-		go func(tc ticketContext) {
-			// Add permalink into description
-			permalink, err := getSlackPermalink(tc.Channel, tc.ThreadTS)
-			summary, description := buildBacklogIssue(tc)
-			if err == nil && permalink != "" {
-				description = strings.Replace(description, "Slackスレッド: (後で追加)", "Slackスレッド: "+permalink, 1)
+			// Always fetch the full parent message from Slack API.
+			// The in-memory cache can't be relied on (render.io cold starts).
+			var errorText string
+			msg, err := getParentMessageFull(channel, threadTS)
+			if err == nil {
+				errorText = extractFullSlackMessage(msg)
+			} else {
+				fmt.Printf("[dig-deeper] failed to fetch parent message: %v\n", err)
 			}
-			issueKey, issueURL, err := createBacklogIssue(
-				os.Getenv("BACKLOG_PROJECT_KEY"),
-				os.Getenv("BACKLOG_BASE_URL"),
-				os.Getenv("BACKLOG_API_KEY"),
-				summary, description,
-			)
-			if err != nil {
-				postToSlackSimple(tc.Channel, tc.ThreadTS, fmt.Sprintf(":x: Backlog作成に失敗しました: %v", err))
-				return
-			}
-			postToSlackSimple(tc.Channel, tc.ThreadTS, fmt.Sprintf(":white_check_mark: Backlogチケットを作成しました: %s\n%s", issueKey, issueURL))
-		}(ctx)
+
+			// Ack immediately
+			c.Status(http.StatusOK)
+
+			handleDigDeeper(channel, threadTS, errorText)
+
+		default:
+			c.Status(http.StatusOK)
+		}
 	})
 
 	r.Run(":8080")
+}
+
+// handleDigDeeper processes the dig-deeper button click.
+// It's extracted for testability.
+func handleDigDeeper(channel, threadTS, errorText string) {
+	go func(channel, threadTS, errorText string) {
+		// 1. Post "分析中..." interim message
+		postToSlackSimple(channel, threadTS, ":hourglass_flowing_sand: 分析中...")
+
+		// Debug: log what errorText we're working with
+		preview := errorText
+		if len(preview) > 500 {
+			preview = preview[:500] + "…"
+		}
+		fmt.Printf("[dig-deeper] errorText length=%d, preview: %s\n", len(errorText), preview)
+
+		// 2. Parse file references
+		refs := parseFileRefs(errorText, maxFileRefs)
+		fmt.Printf("[dig-deeper] parseFileRefs found %d refs\n", len(refs))
+		if len(refs) == 0 {
+			postToSlackSimple(channel, threadTS, "コード参照が見つかりませんでした")
+			return
+		}
+
+		// 3. Fetch code context from Bitbucket
+		fmt.Printf("[dig-deeper] fetching code from Bitbucket for %d refs...\n", len(refs))
+		codeContext := fetchBitbucketContext(refs, maxContextChars)
+		fmt.Printf("[dig-deeper] code context: %d chars\n", len(codeContext))
+		if codeContext == "" {
+			postToSlackSimple(channel, threadTS, "コード取得に失敗しました")
+			return
+		}
+
+		// 4. Call AI with code context
+		fmt.Println("[dig-deeper] calling AI for deep analysis...")
+		analysis := explainErrorWithContext(errorText, codeContext)
+		fmt.Printf("[dig-deeper] AI response: %d chars\n", len(analysis))
+
+		// 5. Post enhanced analysis
+		postToSlackSimple(channel, threadTS, analysis)
+	}(channel, threadTS, errorText)
 }
