@@ -18,8 +18,8 @@ import (
 func verifySlackSignature(c *gin.Context, rawBody []byte) bool {
 	secret := os.Getenv("SLACK_SIGNING_SECRET")
 	if secret == "" {
-		// If not set, skip verification (not recommended in prod)
-		return true
+		// 署名シークレット未設定時は検証スキップせず拒否する（なりすまし防止）
+		return false
 	}
 	ts := c.GetHeader("X-Slack-Request-Timestamp")
 	sig := c.GetHeader("X-Slack-Signature")
